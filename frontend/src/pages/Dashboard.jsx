@@ -47,18 +47,23 @@ export default function Dashboard() {
   }
 
   async function syncSpotify() {
+    const token = localStorage.getItem('harmonia_access_token');
+    const userId = localStorage.getItem('harmonia_user_id');
+    if (!token) { setErr('No token — please log out and back in'); return; }
     setSyncing(true); setErr('');
-    // Simulate fetching from Spotify API
-    await new Promise(r => setTimeout(r, 1800));
-    // Update profile display to show synced data
-    setProfile(prev => ({
-      ...prev,
-      topTrackIds: Array(50).fill(0).map((_,i) => 'track_' + i),
-      topArtistIds: Array(20).fill(0).map((_,i) => 'artist_' + i),
-      genres: ['pop','hip-hop','r&b','indie','country','rap','alternative','soul','trap','folk'],
-    }));
-    setSyncing(false);
-    setSynced(true);
+    try {
+      const res = await fetch(API + '/profile/spotify-refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+        body: JSON.stringify({ accessToken: token, useRecentlyPlayed: true })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed');
+      setSynced(true);
+      window.location.reload();
+    } catch(e) {
+      setErr('Sync failed — try logging out and back in');
+    } finally { setSyncing(false); }
   }
 
   async function createGroup() {
@@ -67,6 +72,20 @@ export default function Dashboard() {
       const g = await api.createGroup(newName.trim());
       navigate('/group/' + g.groupId);
     } catch (e) { setErr(e.message); }
+  }
+
+  async function leaveGroup(groupId, e) {
+    e.stopPropagation();
+    if (!window.confirm('Leave this group?')) return;
+    try {
+      const res = await fetch(`${API}/groups/${groupId}/leave`, {
+        method: 'POST',
+        headers: { 'X-User-Id': localStorage.getItem('harmonia_user_id') }
+      });
+      if (!res.ok) throw new Error('Failed');
+      const updated = await api.listGroups();
+      setGroups(updated.groups || []);
+    } catch(e) { setErr(e.message); }
   }
 
   async function joinGroup() {
@@ -87,36 +106,31 @@ export default function Dashboard() {
         {err && <div className="error-banner">{err}</div>}
 
         {profile && (
-          <div className="card" style={{ marginBottom: 20, display: 'flex', gap: 20, alignItems: 'center' }}>
-            {profile.imageUrl
-              ? <img src={profile.imageUrl} alt="" style={{ width: 64, height: 64, borderRadius: '50%', objectFit: 'cover' }} />
-              : <div className="avatar" style={{ width: 64, height: 64, fontSize: 28 }}>{profile.displayName?.[0]}</div>}
-            <div>
-              <div style={{ fontSize: 22, fontWeight: 800 }}>{profile.displayName}</div>
-              <div style={{ color: 'var(--muted)', fontSize: 14, marginTop: 4 }}>
-                {profile.topTrackIds?.length || 0} top tracks · {profile.topArtistIds?.length || 0} top artists
-              </div>
-              <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-                {(profile.genres || []).slice(0, 5).map(g => (
-                  <span key={g} style={{
-                    background: 'rgba(124,58,237,.2)', border: '1px solid rgba(124,58,237,.35)',
-                    borderRadius: 20, padding: '2px 10px', fontSize: 12, color: 'var(--purple-l)',
-                  }}>{g}</span>
-                ))}
+          <div className="card" style={{ marginBottom: 20, display: 'flex', gap: 20, alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', gap: 20, alignItems: 'center' }}>
+              {profile.imageUrl
+                ? <img src={profile.imageUrl} alt="" style={{ width: 64, height: 64, borderRadius: '50%', objectFit: 'cover' }} />
+                : <div className="avatar" style={{ width: 64, height: 64, fontSize: 28 }}>{profile.displayName?.[0]}</div>}
+              <div>
+                <div style={{ fontSize: 22, fontWeight: 800 }}>{profile.displayName}</div>
+                <div style={{ color: 'var(--muted)', fontSize: 14, marginTop: 4 }}>
+                  {profile.topTrackIds?.length || 0} top tracks · {profile.topArtistIds?.length || 0} top artists
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                  {(profile.genres || []).slice(0, 5).map(g => (
+                    <span key={g} style={{
+                      background: 'rgba(124,58,237,.2)', border: '1px solid rgba(124,58,237,.35)',
+                      borderRadius: 20, padding: '2px 10px', fontSize: 12, color: 'var(--purple-l)',
+                    }}>{g}</span>
+                  ))}
+                </div>
               </div>
             </div>
+            <button className="btn-green" style={{ fontSize: 13, padding: '10px 20px', whiteSpace: 'nowrap', background: synced ? '#059669' : '' }} onClick={syncSpotify} disabled={syncing || synced}>
+              {syncing ? '⏳ Syncing…' : synced ? '✓ Synced' : '🎵 Sync Spotify'}
+            </button>
           </div>
         )}
-
-        <div style={{ marginBottom: 20, padding: '12px 16px', background: 'rgba(29,185,84,.1)', border: '1px solid rgba(29,185,84,.3)', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 14, color: '#1db954' }}>🎵 Sync Real Spotify Data</div>
-            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>Load your actual top tracks and artists from Spotify</div>
-          </div>
-          <button className="btn-green" style={{ fontSize: 13, padding: '8px 18px', whiteSpace: 'nowrap', background: synced ? '#059669' : '' }} onClick={syncSpotify} disabled={syncing || synced}>
-            {syncing ? 'Syncing…' : synced ? '✓ Synced' : 'Sync Now'}
-          </button>
-        </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginBottom: 32 }}>
           <div className="card">
@@ -148,11 +162,12 @@ export default function Dashboard() {
                   <div style={{ fontWeight: 700, fontSize: 17 }}>{g.name}</div>
                   <div style={{ color: 'var(--muted)', fontSize: 13, marginTop: 4 }}>
                     Code: <span style={{ fontFamily: 'monospace', color: 'var(--purple-l)', letterSpacing: 2 }}>{g.groupId}</span>
-                    {' · '}{(g.members ? (Array.isArray(g.members) ? g.members.length : Object.keys(g.members).length) : 0)} members
-                    {g.playlist && ' · ✅ Playlist generated'}
                   </div>
                 </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                <button className="btn-ghost" style={{ fontSize: 12, padding: '8px 14px', color: 'var(--muted)' }} onClick={(e) => leaveGroup(g.groupId, e)}>Leave</button>
                 <button className="btn-primary" style={{ fontSize: 13, padding: '8px 18px' }}>Open →</button>
+              </div>
               </div>
             ))}
           </div>

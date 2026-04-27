@@ -164,6 +164,12 @@ Resources:
             RestApiId: !Ref HarmoniaApi
             Path: /groups/{groupId}/join
             Method: POST
+        LeaveGroup:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HarmoniaApi
+            Path: /groups/{groupId}/leave
+            Method: POST
         ListGroups:
           Type: Api
           Properties:

@@ -43,15 +43,35 @@ def spotify_refresh(user_id, event):
             with urllib.request.urlopen(req) as r:
                 return json.loads(r.read())
 
-        tracks = sp_get("/me/top/tracks?limit=50&time_range=medium_term")
-        artists = sp_get("/me/top/artists?limit=20&time_range=medium_term")
+        use_recent = body.get('useRecentlyPlayed', False)
 
-        track_ids = [t["id"] for t in tracks.get("items", [])]
-        track_names = [t["name"] for t in tracks.get("items", [])]
-        track_artists = [t["artists"][0]["name"] for t in tracks.get("items", [])]
-        artist_ids = [a["id"] for a in artists.get("items", [])]
-        artist_names = [a["name"] for a in artists.get("items", [])]
-        genres = list({g for a in artists.get("items", []) for g in a.get("genres", [])})
+        if use_recent:
+            recent = sp_get("/me/player/recently-played?limit=50")
+            items = recent.get("items", [])
+            seen = set()
+            track_ids, track_names, track_artists = [], [], []
+            artist_map = {}
+            for item in items:
+                t = item["track"]
+                if t["id"] not in seen:
+                    seen.add(t["id"])
+                    track_ids.append(t["id"])
+                    track_names.append(t["name"])
+                    track_artists.append(t["artists"][0]["name"])
+                for a in t["artists"]:
+                    artist_map[a["id"]] = a["name"]
+            artist_ids = list(artist_map.keys())
+            artist_names = list(artist_map.values())
+            genres = []
+        else:
+            tracks = sp_get("/me/top/tracks?limit=50&time_range=medium_term")
+            artists = sp_get("/me/top/artists?limit=20&time_range=medium_term")
+            track_ids = [t["id"] for t in tracks.get("items", [])]
+            track_names = [t["name"] for t in tracks.get("items", [])]
+            track_artists = [t["artists"][0]["name"] for t in tracks.get("items", [])]
+            artist_ids = [a["id"] for a in artists.get("items", [])]
+            artist_names = [a["name"] for a in artists.get("items", [])]
+            genres = list({g for a in artists.get("items", []) for g in a.get("genres", [])})
 
         update_user(user_id, {
             'topTrackIds': track_ids,

@@ -9,6 +9,41 @@ from db import (get_group, put_group, add_member_to_group, get_user,
 
 
 def lambda_handler(event, context):
+    path = event.get('path', '')
+    method = event.get('httpMethod', 'GET')
+    if 'leave' in path and method == 'POST':
+        return handle_leave(event)
+    return handle_main(event)
+
+def handle_leave(event):
+    import boto3, os
+    user_id = get_user_id(event)
+    group_id = (event.get('pathParameters') or {}).get('groupId')
+    if not user_id or not group_id:
+        return err('Missing params', 400)
+    region = os.environ.get('AWS_REGION', 'us-east-2')
+    ddb = boto3.resource('dynamodb', region_name=region)
+    groups_table = os.environ.get('GROUPS_TABLE', 'harmonia-groups-prod')
+    users_table = os.environ.get('USERS_TABLE', 'harmonia-users-prod')
+    # Remove user from group
+    ddb.Table(groups_table).update_item(
+        Key={'groupId': group_id},
+        UpdateExpression='DELETE members :m',
+        ExpressionAttributeValues={':m': {user_id}}
+    )
+    # Remove group from user
+    try:
+        ddb.Table(users_table).update_item(
+            Key={'userId': user_id},
+            UpdateExpression='DELETE groups :g',
+            ExpressionAttributeValues={':g': {group_id}}
+        )
+    except Exception:
+        pass
+    log_event('group_leave', user_id=user_id, group_id=group_id)
+    return ok({'message': 'Left group'})
+
+def handle_main(event, context=None):
     method = event.get('httpMethod', 'GET')
     path   = event.get('path', '')
     pp     = event.get('pathParameters') or {}

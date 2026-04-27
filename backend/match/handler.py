@@ -40,12 +40,14 @@ def lambda_handler(event, context):
             put_cached_score(a, b, score)
             cache_misses += 1
 
+        breakdown = compute_breakdown(users[a], users[b])
         pair_scores.append({
             'userA': a,
             'nameA': users[a].get('displayName', a),
             'userB': b,
             'nameB': users[b].get('displayName', b),
             'score': round(score, 1),
+            'breakdown': breakdown,
         })
 
     group_score = round(sum(p['score'] for p in pair_scores) / len(pair_scores), 1) if pair_scores else 0
@@ -71,6 +73,31 @@ def lambda_handler(event, context):
     })
 
 
+def compute_breakdown(user_a, user_b):
+    artists_a = set(user_a.get('topArtistIds') or [])
+    artists_b = set(user_b.get('topArtistIds') or [])
+    union_a = artists_a | artists_b
+    shared_a = len(artists_a & artists_b)
+    artist_score = round(shared_a / len(union_a) * 60, 1) if union_a else 0
+
+    genres_a = set(user_a.get('genres') or [])
+    genres_b = set(user_b.get('genres') or [])
+    union_g = genres_a | genres_b
+    shared_g = len(genres_a & genres_b)
+    genre_score = round(shared_g / len(union_g) * 10, 1) if union_g else 0
+
+    tracks_a = set(user_a.get('topTrackIds') or [])
+    tracks_b = set(user_b.get('topTrackIds') or [])
+    union_t = tracks_a | tracks_b
+    shared_t = len(tracks_a & tracks_b)
+    track_score = round(shared_t / len(union_t) * 30, 1) if union_t else 0
+
+    return {
+        'artistScore': artist_score, 'artistShared': shared_a, 'artistTotal': len(union_a),
+        'genreScore': genre_score, 'genreShared': shared_g, 'genreTotal': len(union_g),
+        'trackScore': track_score, 'trackShared': shared_t, 'trackTotal': len(union_t),
+    }
+
 def compute_compatibility(user_a, user_b):
     """
     Score breakdown (0–100):
@@ -81,12 +108,12 @@ def compute_compatibility(user_a, user_b):
     artists_a = set(user_a.get('topArtistIds') or [])
     artists_b = set(user_b.get('topArtistIds') or [])
     union_a = artists_a | artists_b
-    artist_score = (len(artists_a & artists_b) / len(union_a) * 40) if union_a else 0
+    artist_score = (len(artists_a & artists_b) / len(union_a) * 60) if union_a else 0
 
     genres_a = set(user_a.get('genres') or [])
     genres_b = set(user_b.get('genres') or [])
     union_g = genres_a | genres_b
-    genre_score = (len(genres_a & genres_b) / len(union_g) * 30) if union_g else 0
+    genre_score = (len(genres_a & genres_b) / len(union_g) * 10) if union_g else 0
 
     # Track overlap bonus (up to 30pts)
     tracks_a = set(user_a.get('topTrackIds') or [])

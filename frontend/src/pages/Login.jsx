@@ -36,7 +36,7 @@ export default function Login() {
       redirect_uri: REDIRECT_URI,
       code_challenge_method: 'S256',
       code_challenge: challenge,
-      scope: 'user-read-private user-read-email user-top-read playlist-modify-private playlist-modify-public',
+      scope: 'user-read-private user-read-email user-top-read user-read-recently-played playlist-modify-private playlist-modify-public',
     });
     window.location.href = 'https://accounts.spotify.com/authorize?' + params.toString();
   }
