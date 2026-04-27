@@ -1,0 +1,510 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Harmonia - Group Playlist Generator
+
+Globals:
+  Function:
+    Runtime: python3.9
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        USERS_TABLE: !Ref UsersTable
+        GROUPS_TABLE: !Ref GroupsTable
+        SCORES_TABLE: !Ref ScoresTable
+        SECRET_NAME: harmonia/spotify/credentials
+        REDIRECT_URI: !Ref SpotifyRedirectUri
+        FRONTEND_URL: !Ref FrontendUrl
+    Tags:
+      env: !Ref Environment
+      team: harmonia
+      component: lambda
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, prod]
+  SpotifyRedirectUri:
+    Type: String
+    Description: Spotify OAuth callback URL (e.g. https://yoursite.com/callback)
+  FrontendUrl:
+    Type: String
+    Description: Frontend base URL for CORS and redirects
+
+Resources:
+
+  # ── Shared Lambda Layer ──────────────────────────────────────────────────
+  SharedLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: harmonia-shared
+      ContentUri: backend/layer/
+      CompatibleRuntimes: [python3.9]
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: python3.9
+
+  # ── API Gateway ──────────────────────────────────────────────────────────
+  HarmoniaApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,X-User-Id,X-Access-Token,X-Refresh-Token'"
+        AllowOrigin: "'*'"
+      Tags:
+        env: !Ref Environment
+        team: harmonia
+        component: api-gateway
+
+  # ── Lambda Functions ─────────────────────────────────────────────────────
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub harmonia-auth-${Environment}
+      CodeUri: backend/auth/
+      Handler: handler.lambda_handler
+      Description: Spotify OAuth - login redirect and token exchange
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt LambdaDLQ.Arn
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref SpotifySecret
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+      Events:
+        AuthLogin:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HarmoniaApi
+            Path: /auth/login
+            Method: GET
+        AuthCallback:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HarmoniaApi
+            Path: /auth/callback
+            Method: GET
+        AuthSave:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HarmoniaApi
+            Path: /auth/save
+            Method: POST
+
+  ProfileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub harmonia-profile-${Environment}
+      CodeUri: backend/profile/
+      Handler: handler.lambda_handler
+      Description: Fetch and refresh Spotify user profile + top data
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt LambdaDLQ.Arn
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref SpotifySecret
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+      Events:
+        GetProfile:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HarmoniaApi
+            Path: /profile
+            Method: GET
+        RefreshProfile:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HarmoniaApi
+            Path: /profile/refresh
+            Method: POST
+        SpotifyRefresh:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HarmoniaApi
+            Path: /profile/spotify-refresh
+            Method: POST
+
+  GroupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub harmonia-group-${Environment}
+      CodeUri: backend/group/
+      Handler: handler.lambda_handler
+      Description: Create, join, and retrieve groups
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt LambdaDLQ.Arn
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GroupsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+      Events:
+        CreateGroup:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HarmoniaApi
+            Path: /groups
+            Method: POST
+        GetGroup:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HarmoniaApi
+            Path: /groups/{groupId}
+            Method: GET
+        JoinGroup:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HarmoniaApi
+            Path: /groups/{groupId}/join
+            Method: POST
+        ListGroups:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HarmoniaApi
+            Path: /groups
+            Method: GET
+
+  MatchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub harmonia-match-${Environment}
+      CodeUri: backend/match/
+      Handler: handler.lambda_handler
+      Description: Calculate pairwise compatibility scores (cached 24h)
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt LambdaDLQ.Arn
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GroupsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScoresTable
+      Events:
+        GetScores:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HarmoniaApi
+            Path: /groups/{groupId}/scores
+            Method: GET
+
+  PlaylistFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub harmonia-playlist-${Environment}
+      CodeUri: backend/playlist/
+      Handler: handler.lambda_handler
+      Description: Generate ranked playlist and export to Spotify
+      Timeout: 60
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt LambdaDLQ.Arn
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref SpotifySecret
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GroupsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScoresTable
+      Events:
+        GeneratePlaylist:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HarmoniaApi
+            Path: /groups/{groupId}/playlist
+            Method: POST
+
+  # ── DynamoDB Tables ──────────────────────────────────────────────────────
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub harmonia-users-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+      Tags:
+        - Key: env
+          Value: !Ref Environment
+        - Key: team
+          Value: harmonia
+        - Key: component
+          Value: users-table
+
+  GroupsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub harmonia-groups-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: groupId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: groupId
+          KeyType: HASH
+      Tags:
+        - Key: env
+          Value: !Ref Environment
+        - Key: team
+          Value: harmonia
+        - Key: component
+          Value: groups-table
+
+  ScoresTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub harmonia-scores-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pairKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pairKey
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: env
+          Value: !Ref Environment
+        - Key: team
+          Value: harmonia
+        - Key: component
+          Value: scores-table
+
+  # ── Secrets Manager (SEC2) ────────────────────────────────────────────────
+  SpotifySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: harmonia/spotify/credentials
+      Description: Spotify API client credentials
+      SecretString: '{"client_id":"REPLACE_ME","client_secret":"REPLACE_ME"}'
+      Tags:
+        - Key: env
+          Value: !Ref Environment
+        - Key: team
+          Value: harmonia
+        - Key: component
+          Value: secrets
+
+  # ── Dead Letter Queue (REL6) ──────────────────────────────────────────────
+  LambdaDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub harmonia-dlq-${Environment}
+      MessageRetentionPeriod: 86400
+      Tags:
+        - Key: env
+          Value: !Ref Environment
+        - Key: team
+          Value: harmonia
+        - Key: component
+          Value: dlq
+
+  # ── SNS Alert Topic (REL6) ────────────────────────────────────────────────
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub harmonia-alerts-${Environment}
+      Tags:
+        - Key: env
+          Value: !Ref Environment
+        - Key: team
+          Value: harmonia
+        - Key: component
+          Value: alerts
+
+  # ── CloudWatch Alarms (REL6) ──────────────────────────────────────────────
+  MatchLambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub harmonia-match-errors-${Environment}
+      AlarmDescription: Match Lambda error rate exceeded 1 error/min
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MatchFunction
+
+  PlaylistLambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub harmonia-playlist-errors-${Environment}
+      AlarmDescription: Playlist Lambda errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref PlaylistFunction
+
+  ApiGateway5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub harmonia-api-5xx-${Environment}
+      AlarmDescription: API Gateway 5xx errors
+      MetricName: 5XXError
+      Namespace: AWS/ApiGateway
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref HarmoniaApi
+
+  DLQDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub harmonia-dlq-depth-${Environment}
+      AlarmDescription: Messages in DLQ indicate Lambda failures
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt LambdaDLQ.QueueName
+
+  # ── CloudWatch Dashboard (OPS4) ───────────────────────────────────────────
+  HarmoniaDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub Harmonia-${Environment}
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Invocations",
+                "region": "us-east-2",
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${MatchFunction}"],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${PlaylistFunction}"],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${AuthFunction}"]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Errors",
+                "region": "us-east-2",
+                "metrics": [
+                  ["AWS/Lambda", "Errors", "FunctionName", "${MatchFunction}"],
+                  ["AWS/Lambda", "Errors", "FunctionName", "${PlaylistFunction}"]
+                ],
+                "period": 60,
+                "stat": "Sum",
+                "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "API Latency p99",
+                "region": "us-east-2",
+                "metrics": [
+                  ["AWS/Lambda", "Duration", "FunctionName", "${MatchFunction}", {"stat": "p99"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "${PlaylistFunction}", {"stat": "p99"}]
+                ],
+                "period": 300,
+                "view": "timeSeries"
+              }
+            }
+          ]
+        }
+
+  # ── Frontend S3 Bucket ────────────────────────────────────────────────────
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub harmonia-frontend-${Environment}-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      Tags:
+        - Key: env
+          Value: !Ref Environment
+        - Key: team
+          Value: harmonia
+        - Key: component
+          Value: frontend
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint
+    Value: !Sub https://${HarmoniaApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+    Export:
+      Name: HarmoniaApiUrl
+
+  FrontendBucketName:
+    Description: S3 bucket for frontend
+    Value: !Ref FrontendBucket
+    Export:
+      Name: HarmoniaFrontendBucket
+
+  FrontendUrl:
+    Description: S3 website URL
+    Value: !GetAtt FrontendBucket.WebsiteURL
+
+  AlertTopicArn:
+    Description: SNS topic for alerts (subscribe your email here)
+    Value: !Ref AlertTopic

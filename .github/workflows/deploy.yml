@@ -1,0 +1,83 @@
+name: Deploy Harmonia
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION:       us-east-1
+  SAM_STACK_NAME:   harmonia
+  FRONTEND_BUCKET:  ${{ secrets.FRONTEND_BUCKET }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Install SAM CLI
+        run: pip install aws-sam-cli
+
+      - name: SAM build
+        run: sam build --use-container
+
+      - name: SAM deploy
+        run: |
+          sam deploy \
+            --stack-name $SAM_STACK_NAME \
+            --region $AWS_REGION \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              Environment=prod \
+              SpotifyRedirectUri=${{ secrets.SPOTIFY_REDIRECT_URI }} \
+              FrontendUrl=${{ secrets.FRONTEND_URL }}
+
+      - name: Get API URL from stack outputs
+        id: api
+        run: |
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name $SAM_STACK_NAME \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
+            --output text)
+          echo "url=$API_URL" >> $GITHUB_OUTPUT
+
+      - name: Build React frontend
+        working-directory: frontend
+        env:
+          REACT_APP_API_URL: ${{ steps.api.outputs.url }}
+        run: |
+          npm ci
+          npm run build
+
+      - name: Deploy frontend to S3
+        working-directory: frontend
+        run: |
+          aws s3 sync build/ s3://$FRONTEND_BUCKET \
+            --delete \
+            --cache-control "public,max-age=31536000,immutable" \
+            --exclude "index.html"
+          aws s3 cp build/index.html s3://$FRONTEND_BUCKET/index.html \
+            --cache-control "no-cache,no-store,must-revalidate"
+
+      - name: Print deployed URLs
+        run: |
+          echo "API:      ${{ steps.api.outputs.url }}"
+          echo "Frontend: http://$FRONTEND_BUCKET.s3-website-$AWS_REGION.amazonaws.com"
