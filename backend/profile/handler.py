@@ -62,7 +62,9 @@ def spotify_refresh(user_id, event):
                     artist_map[a["id"]] = a["name"]
             artist_ids = list(artist_map.keys())
             artist_names = list(artist_map.values())
-            genres = []
+            # recently-played doesn't return genres — keep existing ones
+        existing = get_user(user_id) or {}
+        genres = existing.get('genres') or []
         else:
             tracks = sp_get("/me/top/tracks?limit=50&time_range=medium_term")
             artists = sp_get("/me/top/artists?limit=20&time_range=medium_term")
