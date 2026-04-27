@@ -167,4 +167,89 @@ aws dynamodb delete-item \
 - [ ] WebSocket real-time group updates
 - [ ] AWS X-Ray distributed tracing
 - [ ] Multi-region deployment via Route 53
+- [ ] Harmonia Pro freemium tier ($4.99/mo)```
+  Browser
+     │
+     ▼
+┌─────────────────────────────────────────────┐
+│  CloudFront  (HTTPS CDN)                    │
+│  React App served from S3                   │
+└────────────────────┬────────────────────────┘
+                     │ API calls
+                     ▼
+┌─────────────────────────────────────────────┐
+│  API Gateway  (REST)                        │
+│  CORS · Rate limiting · Request routing     │
+└──┬──────┬──────┬──────┬──────┬─────────────┘
+   │      │      │      │      │
+   ▼      ▼      ▼      ▼      ▼
+ Auth  Profile  Group  Match  Playlist
+  λ      λ       λ      λ       λ
+   │      │      │      │      │
+   └──────┴──────┴──────┴──────┘
+                  │
+     ┌────────────┼────────────┐
+     ▼            ▼            ▼
+ DynamoDB    Secrets Mgr   Spotify API
+ (3 tables)  (credentials)  (OAuth + data)
+
+ CloudWatch ◄── All Lambdas emit structured JSON logs
+     │
+     ├── 4 Alarms (API 5xx · DLQ · Match errors · Playlist errors)
+     │
+     ▼
+  SQS DLQ ──► SNS ──► Email alert
+```bash
+# Deploy backend
+sam build
+sam deploy --stack-name harmonia \
+  --region us-east-2 \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides \
+    Environment=prod \
+    SpotifyRedirectUri="https://YOUR_FRONTEND_URL/callback" \
+    FrontendUrl="https://YOUR_FRONTEND_URL" \
+  --resolve-s3 --no-confirm-changeset
+
+# Store Spotify credentials
+aws secretsmanager update-secret \
+  --secret-id harmonia/spotify/credentials \
+  --secret-string '{"client_id":"YOUR_ID","client_secret":"YOUR_SECRET"}'
+
+# Deploy frontend
+cd frontend
+REACT_APP_API_URL=https://YOUR_API_URL npm run build
+aws s3 sync build/ s3://YOUR_BUCKET --delete
+aws s3 cp build/index.html s3://YOUR_BUCKET/index.html --cache-control "no-cache"
+```
+
+---
+
+## Useful Commands
+
+```bash
+# Tail Lambda logs
+aws logs tail /aws/lambda/harmonia-match-prod --region us-east-2 --follow
+
+# Check alarm states
+aws cloudwatch describe-alarms --alarm-name-prefix harmonia \
+  --query 'MetricAlarms[*].{Name:AlarmName,State:StateValue}' --output table
+
+# Clear cached score pair
+aws dynamodb delete-item \
+  --table-name harmonia-scores-prod --region us-east-2 \
+  --key '{"pairKey": {"S": "userA:userB"}}'
+```
+
+---
+
+## Future Roadmap
+
+- [ ] GitHub Actions CI/CD pipeline
+- [ ] Spotify Extended Access for user-top-read scope
+- [ ] Automatic token refresh via refresh token rotation
+- [ ] Audio feature scoring (tempo, energy, danceability)
+- [ ] WebSocket real-time group updates
+- [ ] AWS X-Ray distributed tracing
+- [ ] Multi-region deployment via Route 53
 - [ ] Harmonia Pro freemium tier ($4.99/mo)
